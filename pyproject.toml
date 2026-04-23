@@ -1,0 +1,74 @@
+[project]
+name = "libmatic"
+version = "0.0.1a0"
+description = "個人の知識ベースを自動運用するためのパイプラインテンプレート (LangGraph hybrid)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "luck-tech" },
+]
+keywords = ["langgraph", "agent", "knowledge-base", "curation", "automation"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain>=0.3.0",
+    "langchain-anthropic>=0.3.0",
+    "langgraph-checkpoint-sqlite>=2.0.0",
+    "typer>=0.12.0",
+    "pydantic>=2.7.0",
+    "PyYAML>=6.0",
+    "trafilatura>=1.12.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+libmatic = "libmatic.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/luck-tech/my_library"
+Repository = "https://github.com/luck-tech/my_library"
+Issues = "https://github.com/luck-tech/my_library/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["libmatic"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_return_any = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
