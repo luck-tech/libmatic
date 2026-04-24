@@ -10,17 +10,23 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
+from libmatic.agents.react import build_step_agent
 from libmatic.config import LibmaticConfig
-from libmatic.state.topic_debate import Source, TopicDebateState
+from libmatic.prompts.loader import load_prompt
+from libmatic.state.topic_debate import Fact, Source, TopicDebateState
+from libmatic.tools.coverage import CoverageReport, verify_coverage_core
 from libmatic.tools.github import gh_issue_edit_core, gh_pr_create_core
 from libmatic.tools.source import fetch_source_core
 
@@ -155,9 +161,160 @@ def fact_merger(state: TopicDebateState, config: RunnableConfig) -> dict:
     raise NotImplementedError("次 PR で ReAct agent として実装")
 
 
+def _facts_to_claims_archive(facts: list[Fact]) -> list[dict]:
+    """Fact のリストを verify_coverage_core が期待する claims_archive 形式に変換する。
+
+    各 Fact の source_urls を見て source 単位でグルーピング。
+    Fact に verbatim / relevance_to_theme フィールドが無い現行 v0.1 では:
+      - verbatim は claim と同じ文字列を使う (coverage 検証では probe として使われる)
+      - relevance_to_theme は 'primary' 固定 (将来 Fact に追加予定)
+    """
+    by_source: dict[str, list[tuple[int, Fact]]] = {}
+    for i, f in enumerate(facts):
+        source_urls = f.source_urls or ["unknown"]
+        for url in source_urls:
+            by_source.setdefault(url, []).append((i, f))
+
+    archive: list[dict] = []
+    for source_url, indexed in by_source.items():
+        claims: list[dict] = []
+        for i, f in indexed:
+            claims.append(
+                {
+                    "id": f"c{i}",
+                    "text": f.claim,
+                    "verbatim": f.claim,
+                    "relevance_to_theme": "primary",
+                    "category": f.category,
+                }
+            )
+        archive.append({"source_id": source_url, "claims": claims})
+    return archive
+
+
+def _format_step6_input(
+    state: TopicDebateState, report: CoverageReport | None
+) -> str:
+    """LLM judge に渡す入力テキストを組み立てる。"""
+    lines = [
+        f"## テーマ\n{state.issue_title}",
+        "",
+        f"## issue 本文\n{state.issue_body}",
+        "",
+        f"## lifespan\n{state.lifespan}",
+        "",
+    ]
+    if report is not None:
+        lines.append(
+            f"## 数値カバレッジ\n- 全体: {report.combined.covered}/{report.combined.total} "
+            f"({report.combined.rate:.1f}%)"
+        )
+        lines.append("")
+        lines.append(f"## 未反映 claim 一覧 ({len(report.combined.uncovered)} 件)")
+        # 多すぎると token 食うので 40 件に truncate
+        for u in report.combined.uncovered[:40]:
+            lines.append(f"- [{u.relevance}/{u.category}] {u.text}")
+    else:
+        lines.append("## 数値カバレッジ\nfacts が空のため計算できず")
+    return "\n".join(lines)
+
+
+def _last_message_content(result: Any) -> str:
+    """LangGraph agent の invoke 結果から最後の message の content を string で取る。
+
+    Anthropic 等の structured content (list of {type, text}) も平文化する。
+    """
+    messages = (result or {}).get("messages", []) if isinstance(result, dict) else []
+    if not messages:
+        return ""
+    last = messages[-1]
+    content = getattr(last, "content", None)
+    if content is None and isinstance(last, dict):
+        content = last.get("content")
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
+    return str(content) if content is not None else ""
+
+
+def _parse_gaps_json(content: str) -> list[str]:
+    """LLM 出力から JSON array (`[...]`) を抽出し、文字列のリストに。
+
+    - 周辺に余計な前置き/後置き文章があっても最初の `[` と最後の `]` 区間を掴む
+    - 解析失敗 / 見つからない → 空リスト
+    """
+    if not content:
+        return []
+    # 最初の `[` から最後の `]` まで (貪欲マッチ) を取る
+    start = content.find("[")
+    end = content.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        return []
+    snippet = content[start : end + 1]
+    try:
+        data = json.loads(snippet)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(x) for x in data if x]
+
+
 def coverage_verifier(state: TopicDebateState, config: RunnableConfig) -> dict:
-    """Step 6 (hybrid): verify_coverage + LLM judge。"""
-    raise NotImplementedError("次 PR で hybrid node として実装 (verify_coverage + LLM judge)")
+    """Step 6 (hybrid): verify_coverage で数値算出 + LLM judge で gap を言語化。
+
+    - article_draft があればそれを検証対象、無ければ issue_body を対象にして
+      「facts がテーマの論点をカバーできているか」を代理検証する
+    - coverage_loop_count はこの node で +1 (次の coverage_gate で loop 判定に使う)
+    - facts 空 / LLM 失敗 時は gap を空で返し、score は 0 か数値計算結果に従う
+    """
+    lcfg = _get_libmatic_config(config)
+
+    # 1. 数値カバレッジ (verify_coverage tool を pure 関数として呼ぶ)
+    claims_archive = _facts_to_claims_archive(state.merged_facts)
+    article_text = state.article_draft or state.issue_body
+
+    report: CoverageReport | None = None
+    coverage_score = 0.0
+    if claims_archive:
+        try:
+            report = verify_coverage_core(
+                claims_archive=claims_archive,
+                articles=[article_text],
+                combined_threshold=lcfg.workflow.coverage_threshold * 100,
+            )
+            coverage_score = report.combined.rate / 100.0
+        except ValueError:
+            # articles 空の ValueError — article_text が "" のとき発生しうる
+            coverage_score = 0.0
+            report = None
+
+    # 2. LLM judge で gap を言語化
+    agent = build_step_agent(
+        step_name="step6_coverage_verifier",
+        config=lcfg,
+        tools=[],
+        system_prompt=load_prompt("topic_debate/step6_coverage_verifier.md"),
+    )
+    input_text = _format_step6_input(state, report)
+    try:
+        result = agent.invoke({"messages": [HumanMessage(content=input_text)]})
+        last_content = _last_message_content(result)
+        gaps = _parse_gaps_json(last_content)
+    except Exception:
+        # LLM 呼出が失敗しても node 全体は落とさない (数値側の判定だけ残す)
+        gaps = []
+
+    return {
+        "coverage_score": coverage_score,
+        "coverage_gaps": gaps,
+        "coverage_loop_count": state.coverage_loop_count + 1,
+    }
 
 
 def article_writer(state: TopicDebateState, config: RunnableConfig) -> dict:

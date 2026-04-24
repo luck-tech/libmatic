@@ -357,10 +357,12 @@ def test_pr_opener_writes_files_and_creates_pr(
 
 
 def test_pr_opener_unimplemented_steps_raise() -> None:
-    """未実装 step は NotImplementedError を投げる (次 PR で実装予定の sanity check)."""
+    """未実装 step は NotImplementedError を投げる (次 PR で実装予定の sanity check)。
+
+    coverage_verifier は本 PR で実装済みなのでここから除外。
+    """
     from libmatic.nodes.topic_debate import (
         article_writer,
-        coverage_verifier,
         expanded_writer,
         fact_extractor,
         fact_merger,
@@ -375,9 +377,233 @@ def test_pr_opener_unimplemented_steps_raise() -> None:
         source_collector,
         fact_extractor,
         fact_merger,
-        coverage_verifier,
         article_writer,
         expanded_writer,
     ):
         with pytest.raises(NotImplementedError):
             fn(state, rc)
+
+
+# --- coverage_verifier (hybrid) ---
+
+
+def _fake_agent_returning(content: str) -> Any:
+    fake = MagicMock()
+    fake.invoke = MagicMock(
+        return_value={"messages": [MagicMock(content=content)]}
+    )
+    return fake
+
+
+def test_coverage_verifier_computes_score_and_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """facts + article → verify_coverage_core で数値、LLM で gap 言語化。"""
+    from libmatic.state.topic_debate import Fact
+
+    facts = [
+        Fact(
+            claim="Next.js 15 の cache 戦略は段階的に変わる",
+            source_urls=["s1"],
+            confidence="high",
+            category="design",
+        ),
+        Fact(
+            claim="tsgo で 10 倍の高速化を達成",
+            source_urls=["s2"],
+            confidence="medium",
+            category="number",
+        ),
+    ]
+    state = _make_state(
+        merged_facts=facts,
+        article_draft="記事で Next.js 15 の cache 戦略は段階的に変わる ことに触れる。",
+    )
+    cfg = _make_config(coverage_threshold=0.80)
+
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import coverage_verifier
+
+    monkeypatch.setattr(
+        nodes_mod,
+        "build_step_agent",
+        lambda step_name, config, tools, system_prompt: _fake_agent_returning(
+            '以下が gap です: ["gap-1", "gap-2"]'
+        ),
+    )
+
+    result = coverage_verifier(state, _rc(cfg))
+    # 2 件中 1 件 match なので 50% 前後
+    assert 0.3 < result["coverage_score"] < 0.7
+    assert result["coverage_gaps"] == ["gap-1", "gap-2"]
+    assert result["coverage_loop_count"] == 1
+
+
+def test_coverage_verifier_empty_facts_returns_zero_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _make_state(merged_facts=[])
+    cfg = _make_config()
+
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import coverage_verifier
+
+    monkeypatch.setattr(
+        nodes_mod, "build_step_agent",
+        lambda *a, **kw: _fake_agent_returning("[]"),
+    )
+
+    result = coverage_verifier(state, _rc(cfg))
+    assert result["coverage_score"] == 0.0
+    assert result["coverage_gaps"] == []
+    assert result["coverage_loop_count"] == 1
+
+
+def test_coverage_verifier_llm_failure_returns_empty_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LLM 呼出が例外を投げても node 全体は落ちず、gaps=[] で返る。"""
+    from libmatic.state.topic_debate import Fact
+
+    # claim は probe match (>= 8 chars) するように長めに
+    state = _make_state(
+        merged_facts=[
+            Fact(
+                claim="重要な論点である claim",
+                source_urls=["s"],
+                confidence="high",
+                category="c",
+            )
+        ],
+        article_draft="記事の中で 重要な論点である claim に触れる。",
+    )
+    cfg = _make_config()
+
+    class FailingAgent:
+        def invoke(self, _: dict) -> dict:
+            raise RuntimeError("LLM down")
+
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import coverage_verifier
+
+    monkeypatch.setattr(nodes_mod, "build_step_agent", lambda *a, **kw: FailingAgent())
+
+    result = coverage_verifier(state, _rc(cfg))
+    assert result["coverage_gaps"] == []
+    # 数値側は引き続き計算される
+    assert result["coverage_score"] > 0
+    assert result["coverage_loop_count"] == 1
+
+
+def test_coverage_verifier_increments_loop_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _make_state(merged_facts=[], coverage_loop_count=1)
+    cfg = _make_config()
+
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import coverage_verifier
+
+    monkeypatch.setattr(
+        nodes_mod, "build_step_agent",
+        lambda *a, **kw: _fake_agent_returning("[]"),
+    )
+
+    result = coverage_verifier(state, _rc(cfg))
+    assert result["coverage_loop_count"] == 2
+
+
+def test_coverage_verifier_uses_issue_body_when_no_article(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """article_draft が空のとき、issue_body を検証対象にする (初回 step 6)."""
+    from libmatic.state.topic_debate import Fact
+
+    state = _make_state(
+        issue_body="テーマの論点として foo bar baz claim が重要。",
+        merged_facts=[
+            Fact(
+                claim="foo bar baz claim",
+                source_urls=["s"],
+                confidence="high",
+                category="c",
+            )
+        ],
+        article_draft="",
+    )
+    cfg = _make_config()
+
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import coverage_verifier
+
+    monkeypatch.setattr(
+        nodes_mod, "build_step_agent",
+        lambda *a, **kw: _fake_agent_returning("[]"),
+    )
+
+    result = coverage_verifier(state, _rc(cfg))
+    # issue_body 内に claim が含まれるので cover される
+    assert result["coverage_score"] > 0.5
+
+
+# --- _facts_to_claims_archive ---
+
+
+def test_facts_to_claims_archive_groups_by_source() -> None:
+    from libmatic.nodes.topic_debate import _facts_to_claims_archive
+    from libmatic.state.topic_debate import Fact
+
+    facts = [
+        Fact(claim="A", source_urls=["s1"], confidence="high", category="c"),
+        Fact(claim="B", source_urls=["s1", "s2"], confidence="high", category="c"),
+        Fact(claim="C", source_urls=["s2"], confidence="low", category="c"),
+    ]
+    archive = _facts_to_claims_archive(facts)
+    source_ids = {a["source_id"] for a in archive}
+    assert source_ids == {"s1", "s2"}
+    s1_claims = next(a["claims"] for a in archive if a["source_id"] == "s1")
+    s2_claims = next(a["claims"] for a in archive if a["source_id"] == "s2")
+    assert {c["text"] for c in s1_claims} == {"A", "B"}
+    assert {c["text"] for c in s2_claims} == {"B", "C"}
+
+
+def test_facts_to_claims_archive_unknown_source_when_empty_urls() -> None:
+    from libmatic.nodes.topic_debate import _facts_to_claims_archive
+    from libmatic.state.topic_debate import Fact
+
+    facts = [Fact(claim="X", source_urls=[], confidence="high", category="c")]
+    archive = _facts_to_claims_archive(facts)
+    assert len(archive) == 1
+    assert archive[0]["source_id"] == "unknown"
+
+
+# --- _parse_gaps_json ---
+
+
+def test_parse_gaps_json_direct_array() -> None:
+    from libmatic.nodes.topic_debate import _parse_gaps_json
+
+    assert _parse_gaps_json('["a", "b", "c"]') == ["a", "b", "c"]
+
+
+def test_parse_gaps_json_surrounded_by_text() -> None:
+    from libmatic.nodes.topic_debate import _parse_gaps_json
+
+    content = '以下が gap です:\n["x", "y"]\n以上。'
+    assert _parse_gaps_json(content) == ["x", "y"]
+
+
+def test_parse_gaps_json_invalid_returns_empty() -> None:
+    from libmatic.nodes.topic_debate import _parse_gaps_json
+
+    assert _parse_gaps_json("") == []
+    assert _parse_gaps_json("no brackets here") == []
+    assert _parse_gaps_json("[not valid json]") == []
+
+
+def test_parse_gaps_json_filters_empty_and_null() -> None:
+    from libmatic.nodes.topic_debate import _parse_gaps_json
+
+    content = '["a", "", "b", null, "c"]'
+    # 空文字列と None は除外
+    assert _parse_gaps_json(content) == ["a", "b", "c"]
