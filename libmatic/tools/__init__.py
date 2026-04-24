@@ -1,17 +1,22 @@
 """LangChain tools for libmatic workflows.
 
 実装状況:
-- 完了: bash, fs (read/edit/write_file), search_sources (Phase 1.4 PoC #1)
-- Stub (NotImplementedError): web, source, coverage, github
+- 完了: bash, fs (read/edit/write_file), search_sources (PoC #1),
+  verify_coverage (PoC #2)
+- Stub (NotImplementedError): web, source, github
 
 Phase 1.4 残り順序 (libmatic-oss-plan.md §3.3 d):
-  2. verify_coverage (scripts/verify_coverage.py 移植) — hybrid node の練習
   3. fetch_source, fetch_x_thread (scripts/fetch_source.py, fetch_x.py 移植)
-  4. extract_facts, web_fetch, web_search
+  4. extract_facts, web_fetch, web_search, github CLI wrapper
 """
 
 from libmatic.tools.bash import bash
-from libmatic.tools.coverage import verify_coverage
+from libmatic.tools.coverage import (
+    CoverageReport,
+    CoverageStats,
+    UncoveredClaim,
+    verify_coverage,
+)
 from libmatic.tools.fs import edit_file, read_file, write_file
 from libmatic.tools.github import (
     gh_issue_create,
@@ -31,7 +36,10 @@ from libmatic.tools.web import web_fetch, web_search
 
 __all__ = [
     "Candidate",
+    "CoverageReport",
+    "CoverageStats",
     "FeedEntry",
+    "UncoveredClaim",
     "bash",
     "edit_file",
     "fetch_source",
