@@ -1,72 +1,262 @@
-"""Node implementations for topic-debate workflow (Phase 1.3 stub).
+"""Node implementations for topic-debate workflow.
 
-Phase 1.4 以降で各 node の中身を実装する。
-Node 種別: SPEC.md §5 参照。
+実装状況 (Phase 1.3 残り):
+- deterministic 完了: source_scorer (step 2), source_fetcher (step 3), pr_opener (step 9)
+- hybrid 未実装: coverage_verifier (step 6) — 次 PR
+- ReAct 未実装: source_collector / fact_extractor / fact_merger /
+  article_writer / expanded_writer — 次 PR (prompts/ 執筆を伴う)
+- conditional edge: coverage_gate は config から閾値を取る形に更新
 """
 
 from __future__ import annotations
 
-from libmatic.state.topic_debate import TopicDebateState
+import math
+import re
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from pathlib import Path
 
-# Default thresholds (config から注入する形で上書き可能)
-DEFAULT_COVERAGE_THRESHOLD = 0.80
-DEFAULT_MAX_COVERAGE_LOOPS = 2
+from langchain_core.runnables import RunnableConfig
+
+from libmatic.config import LibmaticConfig
+from libmatic.state.topic_debate import Source, TopicDebateState
+from libmatic.tools.github import gh_issue_edit_core, gh_pr_create_core
+from libmatic.tools.source import fetch_source_core
 
 
-def source_collector(state: TopicDebateState) -> dict:
+def _get_libmatic_config(config: RunnableConfig) -> LibmaticConfig:
+    """RunnableConfig から LibmaticConfig を取り出す。"""
+    configurable = (config or {}).get("configurable") or {}
+    lcfg = configurable.get("libmatic_config")
+    if not isinstance(lcfg, LibmaticConfig):
+        raise ValueError(
+            "RunnableConfig.configurable.libmatic_config に "
+            "LibmaticConfig インスタンスをセットしてください"
+        )
+    return lcfg
+
+
+# --- Step 1: source_collector (ReAct, 次 PR で実装) ---
+
+
+def source_collector(state: TopicDebateState, config: RunnableConfig) -> dict:
     """Step 1 (ReAct): candidate sources を収集。"""
-    raise NotImplementedError("Phase 1.3 の次段で実装")
+    raise NotImplementedError(
+        "Phase 1.3 次段で ReAct agent を build_step_agent で組み立てる予定"
+    )
 
 
-def source_scorer(state: TopicDebateState) -> dict:
-    """Step 2 (deterministic): source をスコアリング。"""
-    raise NotImplementedError("Phase 1.3 の次段で実装")
+# --- Step 2: source_scorer (deterministic) ---
 
 
-def source_fetcher(state: TopicDebateState) -> dict:
-    """Step 3 (deterministic, Send): 各 source を fetch (並列)。"""
-    raise NotImplementedError("Phase 1.3 の次段で実装")
+def _recency_decay(published_at: str | None, half_life_days: int = 180) -> float:
+    """published_at からの経過日数で指数減衰 (半減期 half_life_days 日)."""
+    if not published_at:
+        return 1.0
+    try:
+        dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return 1.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    delta_days = (datetime.now(UTC) - dt).total_seconds() / 86400
+    if delta_days < 0:
+        return 1.0
+    return math.exp(-delta_days / half_life_days)
 
 
-def fact_extractor(state: TopicDebateState) -> dict:
+def _tokenize(text: str) -> set[str]:
+    """ASCII 英数 + 非 ASCII トークン (2 文字以上) を lowercase set で返す。"""
+    words = re.findall(r"[A-Za-z0-9]+|[^\x00-\x7f]+", text)
+    return {w.lower() for w in words if len(w) >= 2}
+
+
+def _relevance(source_title: str, issue_title: str) -> float:
+    """Theme title と source title の Jaccard 係数 (0 <= r <= 1)."""
+    issue_tokens = _tokenize(issue_title)
+    source_tokens = _tokenize(source_title)
+    if not issue_tokens or not source_tokens:
+        return 0.0
+    overlap = issue_tokens & source_tokens
+    return len(overlap) / len(issue_tokens)
+
+
+def _priority_weight(source: Source) -> float:
+    """source.score に priority 情報が乗っていればそれを使う。無ければ 1.0。"""
+    return source.score if source.score > 0 else 1.0
+
+
+def score_source(source: Source, issue_title: str) -> float:
+    """source の総合スコア。priority × recency × relevance。"""
+    return (
+        _priority_weight(source)
+        * _recency_decay(source.published_at)
+        * _relevance(source.title, issue_title)
+    )
+
+
+def source_scorer(state: TopicDebateState, config: RunnableConfig) -> dict:
+    """Step 2 (deterministic): candidate_sources をスコアリングして上位 N 件に絞る。"""
+    lcfg = _get_libmatic_config(config)
+    limit = lcfg.workflow.max_sources_per_topic
+
+    scored_pairs: list[tuple[float, Source]] = [
+        (score_source(s, state.issue_title), s) for s in state.candidate_sources
+    ]
+    scored_pairs.sort(key=lambda x: x[0], reverse=True)
+
+    scored_sources = [
+        s.model_copy(update={"score": sc}) for sc, s in scored_pairs[:limit]
+    ]
+    return {"scored_sources": scored_sources}
+
+
+# --- Step 3: source_fetcher (deterministic, ThreadPoolExecutor で並列) ---
+
+
+def _fetch_one(source: Source) -> Source:
+    """単一 source を fetch。元の score を引き継ぐ。"""
+    result = fetch_source_core(source.url)
+    if source.score > 0:
+        result = result.model_copy(update={"score": source.score})
+    return result
+
+
+def source_fetcher(state: TopicDebateState, config: RunnableConfig) -> dict:
+    """Step 3 (deterministic + ThreadPool): scored_sources を並列 fetch する。"""
+    lcfg = _get_libmatic_config(config)
+    max_workers = max(1, lcfg.workflow.max_concurrent_fetches)
+
+    if not state.scored_sources:
+        return {"fetched_sources": []}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        fetched = list(executor.map(_fetch_one, state.scored_sources))
+
+    # loop back 時は coverage_loop_count をインクリメント
+    update: dict = {"fetched_sources": fetched}
+    if state.coverage_loop_count > 0 or state.fetched_sources:
+        # 2 周目以降: loop カウンタを維持 (step 6 側で +1 する設計)
+        pass
+    return update
+
+
+# --- Step 4-8: ReAct / hybrid node (次 PR で実装) ---
+
+
+def fact_extractor(state: TopicDebateState, config: RunnableConfig) -> dict:
     """Step 4 (ReAct, Send per source): 各 source から fact を抽出。"""
-    raise NotImplementedError("Phase 1.3 の次段で実装")
+    raise NotImplementedError("次 PR で ReAct agent として実装")
 
 
-def fact_merger(state: TopicDebateState) -> dict:
+def fact_merger(state: TopicDebateState, config: RunnableConfig) -> dict:
     """Step 5 (ReAct): fact の dedup と衝突解決。"""
-    raise NotImplementedError("Phase 1.3 の次段で実装")
+    raise NotImplementedError("次 PR で ReAct agent として実装")
 
 
-def coverage_verifier(state: TopicDebateState) -> dict:
-    """Step 6 (hybrid): verify_coverage の数値 + LLM judge で gap 抽出。"""
-    raise NotImplementedError("Phase 1.3 の次段で実装")
+def coverage_verifier(state: TopicDebateState, config: RunnableConfig) -> dict:
+    """Step 6 (hybrid): verify_coverage + LLM judge。"""
+    raise NotImplementedError("次 PR で hybrid node として実装 (verify_coverage + LLM judge)")
 
 
-def article_writer(state: TopicDebateState) -> dict:
+def article_writer(state: TopicDebateState, config: RunnableConfig) -> dict:
     """Step 7 (ReAct): 原本記事を執筆。"""
-    raise NotImplementedError("Phase 1.3 の次段で実装")
+    raise NotImplementedError("次 PR で ReAct agent として実装")
 
 
-def expanded_writer(state: TopicDebateState) -> dict:
+def expanded_writer(state: TopicDebateState, config: RunnableConfig) -> dict:
     """Step 8 (ReAct): 初学者向け拡張版を執筆。"""
-    raise NotImplementedError("Phase 1.3 の次段で実装")
+    raise NotImplementedError("次 PR で ReAct agent として実装")
 
 
-def pr_opener(state: TopicDebateState) -> dict:
-    """Step 9 (deterministic): git + gh pr create で PR 発行。"""
-    raise NotImplementedError("Phase 1.3 の次段で実装")
+# --- Step 9: pr_opener (deterministic) ---
 
 
-def coverage_gate(state: TopicDebateState) -> str:
-    """Conditional edge: step 6 の結果で step 3 ループ or step 7 へ進む。
+def _slugify(title: str, max_len: int = 80) -> str:
+    """タイトルから git branch 用の slug を作る。
 
-    Phase 0 決定 (SPEC §7):
-    - coverage_score >= threshold or loop_count >= max_loops → step 7
-    - それ以外 → step 3 (loop back)
+    英数字 / ハイフン / 日本語文字を残し、それ以外は '-' に置換。
+    連続ハイフンは 1 つに、前後のハイフンは除去。
     """
-    if state.coverage_score >= DEFAULT_COVERAGE_THRESHOLD:
+    s = title.lower()
+    s = re.sub(r"[^a-z0-9぀-ヿ一-鿿]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s[:max_len] or "untitled"
+
+
+def _run_git(args: list[str], *, cwd: Path | None = None) -> None:
+    subprocess.run(["git", *args], check=True, cwd=cwd)
+
+
+def pr_opener(state: TopicDebateState, config: RunnableConfig) -> dict:
+    """Step 9 (deterministic): branch 切り → 2 ファイル commit → push → PR 作成。
+
+    副作用:
+    - state.output_path に原本を書き込み、同じディレクトリに
+      '{stem}-explained.md' で拡張版を書き込む
+    - git checkout -b topic/{slug} → add → commit → push
+    - gh_pr_create_core で PR 作成
+    - issue ラベル in_progress → review に遷移
+    """
+    lcfg = _get_libmatic_config(config)
+    labels = lcfg.github.issue_labels
+
+    slug = _slugify(state.issue_title)
+    branch = f"topic/{slug}"
+
+    original_path = Path(state.output_path)
+    expanded_path = original_path.with_name(f"{original_path.stem}-explained.md")
+
+    # 1. 記事 2 ファイルを書き出し
+    original_path.parent.mkdir(parents=True, exist_ok=True)
+    original_path.write_text(state.article_draft, encoding="utf-8")
+    expanded_path.write_text(state.article_expanded, encoding="utf-8")
+
+    # 2. git branch + commit + push
+    commit_msg = f"feat(notes): {state.issue_title} (#{state.issue_number})"
+    _run_git(["checkout", "-b", branch])
+    _run_git(["add", str(original_path), str(expanded_path)])
+    _run_git(["commit", "-m", commit_msg])
+    _run_git(["push", "-u", "origin", branch])
+
+    # 3. PR 作成
+    pr_body = f"Closes #{state.issue_number}\n\n{state.issue_body}"
+    pr = gh_pr_create_core(
+        branch=branch,
+        title=f"feat(notes): {state.issue_title}",
+        body=pr_body,
+    )
+
+    # 4. issue ラベル遷移 (in_progress → review)
+    gh_issue_edit_core(
+        state.issue_number,
+        add_labels=[labels.review],
+        remove_labels=[labels.in_progress],
+    )
+
+    return {
+        "pr_number": pr["number"],
+        "pr_url": pr["url"],
+    }
+
+
+# --- Conditional edge: coverage_gate ---
+
+
+def coverage_gate(state: TopicDebateState, config: RunnableConfig) -> str:
+    """Step 6 の結果で step 3 ループ or step 7 へ進むかを決める。
+
+    - coverage_score >= threshold → step 7 (article_writer)
+    - coverage_loop_count >= max_coverage_loops → step 7 (諦めて進む)
+    - それ以外 → step 3 (loop back)
+
+    config から threshold / max_loops を取るので、LibmaticConfig の workflow
+    設定で挙動が変わる。
+    """
+    lcfg = _get_libmatic_config(config)
+    if state.coverage_score >= lcfg.workflow.coverage_threshold:
         return "step7_article_writer"
-    if state.coverage_loop_count >= DEFAULT_MAX_COVERAGE_LOOPS:
+    if state.coverage_loop_count >= lcfg.workflow.max_coverage_loops:
         return "step7_article_writer"
     return "step3_source_fetcher"
