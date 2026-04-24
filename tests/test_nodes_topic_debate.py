@@ -356,32 +356,8 @@ def test_pr_opener_writes_files_and_creates_pr(
     assert result == {"pr_number": 99, "pr_url": "https://github.com/x/y/pull/99"}
 
 
-def test_pr_opener_unimplemented_steps_raise() -> None:
-    """未実装 step は NotImplementedError を投げる (次 PR で実装予定の sanity check)。
-
-    coverage_verifier は本 PR で実装済みなのでここから除外。
-    """
-    from libmatic.nodes.topic_debate import (
-        article_writer,
-        expanded_writer,
-        fact_extractor,
-        fact_merger,
-        source_collector,
-    )
-
-    cfg = _make_config()
-    state = _make_state()
-    rc = _rc(cfg)
-
-    for fn in (
-        source_collector,
-        fact_extractor,
-        fact_merger,
-        article_writer,
-        expanded_writer,
-    ):
-        with pytest.raises(NotImplementedError):
-            fn(state, rc)
+# NOTE: 全 step が実装されたので、以前あった test_pr_opener_unimplemented_steps_raise は削除。
+# 代わりに個別の node test で挙動を確認する。
 
 
 # --- coverage_verifier (hybrid) ---
@@ -607,3 +583,366 @@ def test_parse_gaps_json_filters_empty_and_null() -> None:
     content = '["a", "", "b", null, "c"]'
     # 空文字列と None は除外
     assert _parse_gaps_json(content) == ["a", "b", "c"]
+
+
+# --- _parse_json_array (汎用) ---
+
+
+def test_parse_json_array_returns_list_of_dicts() -> None:
+    from libmatic.nodes.topic_debate import _parse_json_array
+
+    content = '[{"a": 1}, {"b": 2}]'
+    assert _parse_json_array(content) == [{"a": 1}, {"b": 2}]
+
+
+def test_parse_json_array_rejects_non_array() -> None:
+    from libmatic.nodes.topic_debate import _parse_json_array
+
+    assert _parse_json_array('{"not": "array"}') == []
+
+
+# --- _coerce_source_from_raw / _coerce_fact_from_raw ---
+
+
+def test_coerce_source_from_raw_valid() -> None:
+    from libmatic.nodes.topic_debate import _coerce_source_from_raw
+
+    src = _coerce_source_from_raw(
+        {"url": "https://x.com", "type": "generic", "title": "T", "published_at": "2026-04-24"}
+    )
+    assert src is not None
+    assert src.url == "https://x.com"
+    assert src.title == "T"
+
+
+def test_coerce_source_from_raw_missing_url() -> None:
+    from libmatic.nodes.topic_debate import _coerce_source_from_raw
+
+    assert _coerce_source_from_raw({"title": "no url"}) is None
+
+
+def test_coerce_source_from_raw_uses_url_as_title_default() -> None:
+    from libmatic.nodes.topic_debate import _coerce_source_from_raw
+
+    src = _coerce_source_from_raw({"url": "https://a"})
+    assert src is not None
+    assert src.title == "https://a"
+    assert src.type == "generic"
+
+
+def test_coerce_fact_from_raw_valid() -> None:
+    from libmatic.nodes.topic_debate import _coerce_fact_from_raw
+
+    f = _coerce_fact_from_raw(
+        {"claim": "X", "source_urls": ["https://a"], "confidence": "high", "category": "design"}
+    )
+    assert f is not None
+    assert f.claim == "X"
+    assert f.source_urls == ["https://a"]
+
+
+def test_coerce_fact_from_raw_missing_claim() -> None:
+    from libmatic.nodes.topic_debate import _coerce_fact_from_raw
+
+    assert _coerce_fact_from_raw({"source_urls": ["a"]}) is None
+
+
+# --- source_collector ---
+
+
+def test_source_collector_parses_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import source_collector
+
+    fake_output = (
+        '[{"url": "https://a.com", "type": "generic", "title": "A"}, '
+        '{"url": "https://b.com", "type": "zenn", "title": "B", "published_at": "2026-04-01"}]'
+    )
+    monkeypatch.setattr(
+        nodes_mod,
+        "build_step_agent",
+        lambda *a, **kw: _fake_agent_returning(fake_output),
+    )
+
+    state = _make_state()
+    cfg = _make_config()
+    result = source_collector(state, _rc(cfg))
+    candidates: list[Source] = result["candidate_sources"]
+    assert len(candidates) == 2
+    urls = [c.url for c in candidates]
+    assert urls == ["https://a.com", "https://b.com"]
+
+
+def test_source_collector_llm_failure_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import source_collector
+
+    class Failing:
+        def invoke(self, _: dict) -> dict:
+            raise RuntimeError("LLM down")
+
+    monkeypatch.setattr(nodes_mod, "build_step_agent", lambda *a, **kw: Failing())
+
+    result = source_collector(_make_state(), _rc(_make_config()))
+    assert result["candidate_sources"] == []
+
+
+def test_source_collector_drops_invalid_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import source_collector
+
+    # url 欠落エントリ / 不正な type は除外される
+    fake_output = (
+        '[{"url": "https://ok.com", "type": "generic", "title": "OK"}, '
+        '{"title": "no-url"}, '
+        '"string-garbage"]'
+    )
+    monkeypatch.setattr(
+        nodes_mod,
+        "build_step_agent",
+        lambda *a, **kw: _fake_agent_returning(fake_output),
+    )
+
+    result = source_collector(_make_state(), _rc(_make_config()))
+    candidates: list[Source] = result["candidate_sources"]
+    assert len(candidates) == 1
+    assert candidates[0].url == "https://ok.com"
+
+
+# --- fact_extractor ---
+
+
+def test_fact_extractor_parses_facts(monkeypatch: pytest.MonkeyPatch) -> None:
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import fact_extractor
+
+    fake_output = (
+        '[{"claim": "C1", "source_urls": ["s1"], "confidence": "high", "category": "design"},'
+        ' {"claim": "C2", "source_urls": ["s2"], "confidence": "medium", "category": "number"}]'
+    )
+    monkeypatch.setattr(
+        nodes_mod, "build_step_agent", lambda *a, **kw: _fake_agent_returning(fake_output)
+    )
+
+    fetched = [
+        Source(url="s1", type="generic", title="S1", fetched_content="content1"),
+        Source(url="s2", type="generic", title="S2", fetched_content="content2"),
+    ]
+    state = _make_state(fetched_sources=fetched)
+    result = fact_extractor(state, _rc(_make_config()))
+    # raw_facts_per_source は list[list[Fact]]、v0.1 では flat を 1 要素の list で
+    assert len(result["raw_facts_per_source"]) == 1
+    facts = result["raw_facts_per_source"][0]
+    assert len(facts) == 2
+    assert facts[0].claim == "C1"
+
+
+def test_fact_extractor_skips_sources_without_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fetched_content が None の source は agent に渡さない。"""
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import fact_extractor
+
+    captured: dict[str, Any] = {}
+
+    class CapturingAgent:
+        def invoke(self, inp: dict) -> dict:
+            captured["input"] = inp["messages"][0].content
+            return {"messages": [MagicMock(content="[]")]}
+
+    monkeypatch.setattr(nodes_mod, "build_step_agent", lambda *a, **kw: CapturingAgent())
+
+    fetched = [
+        Source(url="empty", type="generic", title="E", fetched_content=None),
+        Source(url="filled", type="generic", title="F", fetched_content="body"),
+    ]
+    state = _make_state(fetched_sources=fetched)
+    fact_extractor(state, _rc(_make_config()))
+
+    # input に filled URL だけ含まれ、empty URL は無い
+    assert "filled" in captured["input"]
+    assert "empty" not in captured["input"]
+
+
+def test_fact_extractor_no_sources_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fetched_sources が全部無効なら agent を呼ばず empty を返す。"""
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import fact_extractor
+
+    # build_step_agent が呼ばれないので AssertionError で監視
+    def should_not_be_called(*a: Any, **kw: Any) -> Any:
+        raise AssertionError("build_step_agent should not be called on empty sources")
+
+    monkeypatch.setattr(nodes_mod, "build_step_agent", should_not_be_called)
+
+    state = _make_state(fetched_sources=[])
+    result = fact_extractor(state, _rc(_make_config()))
+    assert result == {"raw_facts_per_source": []}
+
+
+# --- fact_merger ---
+
+
+def test_fact_merger_parses_merged_facts(monkeypatch: pytest.MonkeyPatch) -> None:
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import fact_merger
+    from libmatic.state.topic_debate import Fact
+
+    fake_output = (
+        '[{"claim": "統合後 A", "source_urls": ["s1", "s2"],'
+        ' "confidence": "high", "category": "design",'
+        ' "relevance_to_theme": "primary"}]'
+    )
+    monkeypatch.setattr(
+        nodes_mod, "build_step_agent", lambda *a, **kw: _fake_agent_returning(fake_output)
+    )
+
+    raw_bucket = [
+        Fact(claim="c1", source_urls=["s1"], confidence="high", category="c"),
+        Fact(claim="c2", source_urls=["s2"], confidence="medium", category="c"),
+    ]
+    state = _make_state(raw_facts_per_source=[raw_bucket])
+    result = fact_merger(state, _rc(_make_config()))
+    merged: list[Fact] = result["merged_facts"]
+    assert len(merged) == 1
+    assert merged[0].claim == "統合後 A"
+    assert merged[0].source_urls == ["s1", "s2"]
+
+
+def test_fact_merger_empty_input_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import fact_merger
+
+    def should_not_be_called(*a: Any, **kw: Any) -> Any:
+        raise AssertionError("agent should not be built on empty raw facts")
+
+    monkeypatch.setattr(nodes_mod, "build_step_agent", should_not_be_called)
+
+    state = _make_state(raw_facts_per_source=[])
+    result = fact_merger(state, _rc(_make_config()))
+    assert result == {"merged_facts": []}
+
+
+# --- _infer_category / _determine_output_path ---
+
+
+def test_infer_category_matches_by_substring() -> None:
+    from libmatic.nodes.topic_debate import _infer_category
+
+    cats = ["ai-ml", "architecture", "development"]
+    assert _infer_category("AI ML と Transformer", "body", cats) == "ai-ml"
+    assert _infer_category("Microservice Architecture", "body", cats) == "architecture"
+
+
+def test_infer_category_falls_back_to_fundamentals() -> None:
+    from libmatic.nodes.topic_debate import _infer_category
+
+    cats = ["ai-ml", "fundamentals", "development"]
+    # どのカテゴリ名も含まれない
+    assert _infer_category("Unrelated topic", "body", cats) == "fundamentals"
+
+
+def test_infer_category_fallback_to_first_when_no_fundamentals() -> None:
+    from libmatic.nodes.topic_debate import _infer_category
+
+    cats = ["x-category", "y-category"]
+    assert _infer_category("Something else", "body", cats) == "x-category"
+
+
+def test_determine_output_path_universal() -> None:
+    from libmatic.nodes.topic_debate import _determine_output_path
+
+    state = _make_state(
+        issue_title="React 19 use API",
+        lifespan="universal",
+    )
+    cfg = _make_config()
+    # content.categories には development が含まれているが、title には
+    # カテゴリ名が含まれないので fundamentals にフォールバック
+    path = _determine_output_path(state, cfg)
+    assert path.startswith("content/")
+    assert path.endswith(".md")
+    assert "notes" in path
+
+
+def test_determine_output_path_ephemeral_has_year_quarter() -> None:
+    from libmatic.nodes.topic_debate import _determine_output_path
+
+    state = _make_state(issue_title="React 19 use", lifespan="ephemeral")
+    path = _determine_output_path(state, _make_config())
+    assert "digest" in path
+    # 現在の年 (2026) と Q が含まれる
+    current_year = datetime.now(UTC).year
+    assert str(current_year) in path
+    assert "Q" in path
+
+
+# --- article_writer ---
+
+
+def test_article_writer_returns_markdown_and_output_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import article_writer
+
+    monkeypatch.setattr(
+        nodes_mod,
+        "build_step_agent",
+        lambda *a, **kw: _fake_agent_returning("# 記事タイトル\n\n本文"),
+    )
+
+    state = _make_state(
+        issue_title="React 19 API",
+        lifespan="universal",
+    )
+    result = article_writer(state, _rc(_make_config()))
+    assert result["article_draft"].startswith("# 記事タイトル")
+    assert result["output_path"].startswith("content/")
+    assert result["output_path"].endswith(".md")
+
+
+def test_article_writer_llm_failure_empty_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import article_writer
+
+    class Failing:
+        def invoke(self, _: dict) -> dict:
+            raise RuntimeError("LLM down")
+
+    monkeypatch.setattr(nodes_mod, "build_step_agent", lambda *a, **kw: Failing())
+
+    state = _make_state()
+    result = article_writer(state, _rc(_make_config()))
+    # article は空でも output_path は決まる
+    assert result["article_draft"] == ""
+    assert result["output_path"].endswith(".md")
+
+
+# --- expanded_writer ---
+
+
+def test_expanded_writer_returns_markdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    import libmatic.nodes.topic_debate as nodes_mod
+    from libmatic.nodes.topic_debate import expanded_writer
+
+    monkeypatch.setattr(
+        nodes_mod,
+        "build_step_agent",
+        lambda *a, **kw: _fake_agent_returning("# 拡張版\n\nストーリー仕立て本文"),
+    )
+
+    state = _make_state(article_draft="# 原本\n本文")
+    result = expanded_writer(state, _rc(_make_config()))
+    assert result["article_expanded"].startswith("# 拡張版")

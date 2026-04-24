@@ -27,8 +27,11 @@ from libmatic.config import LibmaticConfig
 from libmatic.prompts.loader import load_prompt
 from libmatic.state.topic_debate import Fact, Source, TopicDebateState
 from libmatic.tools.coverage import CoverageReport, verify_coverage_core
+from libmatic.tools.fs import read_file
 from libmatic.tools.github import gh_issue_edit_core, gh_pr_create_core
+from libmatic.tools.search_sources import search_sources
 from libmatic.tools.source import fetch_source_core
+from libmatic.tools.web import web_fetch
 
 
 def _get_libmatic_config(config: RunnableConfig) -> LibmaticConfig:
@@ -43,14 +46,61 @@ def _get_libmatic_config(config: RunnableConfig) -> LibmaticConfig:
     return lcfg
 
 
-# --- Step 1: source_collector (ReAct, 次 PR で実装) ---
+# --- Step 1: source_collector (ReAct) ---
+
+
+DEFAULT_SOURCE_PRIORITIES_PATH = "config/source_priorities.yml"
+
+
+def _coerce_source_from_raw(raw: Any) -> Source | None:
+    """LLM 出力の 1 要素 (dict) を Source に変換。失敗時は None。"""
+    if not isinstance(raw, dict) or not raw.get("url"):
+        return None
+    try:
+        return Source(
+            url=str(raw["url"]),
+            type=str(raw.get("type") or "generic"),  # type: ignore[arg-type]
+            title=str(raw.get("title") or raw["url"]),
+            published_at=(raw.get("published_at") or None) or None,
+        )
+    except Exception:
+        return None
 
 
 def source_collector(state: TopicDebateState, config: RunnableConfig) -> dict:
-    """Step 1 (ReAct): candidate sources を収集。"""
-    raise NotImplementedError(
-        "Phase 1.3 次段で ReAct agent を build_step_agent で組み立てる予定"
+    """Step 1 (ReAct): 信頼発信者 + web 検索から candidate sources を収集。
+
+    agent は `search_sources` / `web_fetch` / `read_file` を使って候補を探索し、
+    最終 message で JSON array of {url, type, title, published_at} を返す。
+    """
+    lcfg = _get_libmatic_config(config)
+
+    agent = build_step_agent(
+        step_name="step1_source_collector",
+        config=lcfg,
+        tools=[search_sources, web_fetch, read_file],
+        system_prompt=load_prompt("topic_debate/step1_source_collector.md"),
     )
+    input_text = (
+        f"## テーマ\n{state.issue_title}\n\n"
+        f"## issue 本文\n{state.issue_body}\n\n"
+        f"## lifespan\n{state.lifespan}\n\n"
+        f"## source_priorities_path\n{DEFAULT_SOURCE_PRIORITIES_PATH}\n"
+    )
+
+    try:
+        result = agent.invoke({"messages": [HumanMessage(content=input_text)]})
+        content = _last_message_content(result)
+        raw_candidates = _parse_json_array(content)
+    except Exception:
+        raw_candidates = []
+
+    candidates: list[Source] = []
+    for raw in raw_candidates:
+        src = _coerce_source_from_raw(raw)
+        if src is not None:
+            candidates.append(src)
+    return {"candidate_sources": candidates}
 
 
 # --- Step 2: source_scorer (deterministic) ---
@@ -151,14 +201,117 @@ def source_fetcher(state: TopicDebateState, config: RunnableConfig) -> dict:
 # --- Step 4-8: ReAct / hybrid node (次 PR で実装) ---
 
 
+FACT_CONTENT_TRUNCATE = 8000
+
+
+def _coerce_fact_from_raw(raw: Any) -> Fact | None:
+    """LLM 出力の 1 要素 (dict) を Fact に変換。失敗時は None。"""
+    if not isinstance(raw, dict) or not raw.get("claim"):
+        return None
+    try:
+        return Fact(
+            claim=str(raw["claim"]),
+            source_urls=[str(u) for u in (raw.get("source_urls") or []) if u],
+            confidence=str(raw.get("confidence") or "medium"),  # type: ignore[arg-type]
+            category=str(raw.get("category") or "general"),
+        )
+    except Exception:
+        return None
+
+
 def fact_extractor(state: TopicDebateState, config: RunnableConfig) -> dict:
-    """Step 4 (ReAct, Send per source): 各 source から fact を抽出。"""
-    raise NotImplementedError("次 PR で ReAct agent として実装")
+    """Step 4 (ReAct): fetched_sources の全 source から facts を構造化抽出。
+
+    v0.1 では per-source 並列化は諦め、全 source を 1 回の invoke に渡す。
+    戻り値は state.raw_facts_per_source (list[list[Fact]]) に合わせて
+    `[flat_facts]` の 1 要素 list に格納。
+    """
+    lcfg = _get_libmatic_config(config)
+
+    valid_sources = [s for s in state.fetched_sources if s.fetched_content]
+    if not valid_sources:
+        return {"raw_facts_per_source": []}
+
+    agent = build_step_agent(
+        step_name="step4_fact_extractor",
+        config=lcfg,
+        tools=[],
+        system_prompt=load_prompt("topic_debate/step4_fact_extractor.md"),
+    )
+
+    sources_payload: list[dict] = []
+    for i, s in enumerate(valid_sources):
+        content_trunc = (s.fetched_content or "")[:FACT_CONTENT_TRUNCATE]
+        sources_payload.append(
+            {
+                "id": f"src{i}",
+                "url": s.url,
+                "type": s.type,
+                "title": s.title,
+                "fetched_content": content_trunc,
+            }
+        )
+
+    input_text = (
+        f"## テーマ\n{state.issue_title}\n\n"
+        f"## lifespan\n{state.lifespan}\n\n"
+        f"## sources\n{json.dumps(sources_payload, ensure_ascii=False)}\n"
+    )
+
+    try:
+        result = agent.invoke({"messages": [HumanMessage(content=input_text)]})
+        content = _last_message_content(result)
+        raw_facts = _parse_json_array(content)
+    except Exception:
+        raw_facts = []
+
+    facts: list[Fact] = []
+    for raw in raw_facts:
+        f = _coerce_fact_from_raw(raw)
+        if f is not None:
+            facts.append(f)
+
+    return {"raw_facts_per_source": [facts] if facts else []}
 
 
 def fact_merger(state: TopicDebateState, config: RunnableConfig) -> dict:
-    """Step 5 (ReAct): fact の dedup と衝突解決。"""
-    raise NotImplementedError("次 PR で ReAct agent として実装")
+    """Step 5 (ReAct): raw_facts_per_source を dedup + 階層化 + 衝突解決。"""
+    lcfg = _get_libmatic_config(config)
+
+    all_raw_facts: list[Fact] = [
+        f for per_source in state.raw_facts_per_source for f in per_source
+    ]
+    if not all_raw_facts:
+        return {"merged_facts": []}
+
+    agent = build_step_agent(
+        step_name="step5_fact_merger",
+        config=lcfg,
+        tools=[],
+        system_prompt=load_prompt("topic_debate/step5_fact_merger.md"),
+    )
+
+    raw_payload = [f.model_dump() for f in all_raw_facts]
+    input_text = (
+        f"## テーマ\n{state.issue_title}\n\n"
+        f"## lifespan\n{state.lifespan}\n\n"
+        f"## raw_facts_per_source\n{json.dumps(raw_payload, ensure_ascii=False)}\n"
+    )
+
+    try:
+        result = agent.invoke({"messages": [HumanMessage(content=input_text)]})
+        content = _last_message_content(result)
+        merged_raw = _parse_json_array(content)
+    except Exception:
+        merged_raw = []
+
+    merged: list[Fact] = []
+    for raw in merged_raw:
+        f = _coerce_fact_from_raw(raw)
+        if f is not None:
+            merged.append(f)
+
+    return {"merged_facts": merged}
 
 
 def _facts_to_claims_archive(facts: list[Fact]) -> list[dict]:
@@ -242,15 +395,15 @@ def _last_message_content(result: Any) -> str:
     return str(content) if content is not None else ""
 
 
-def _parse_gaps_json(content: str) -> list[str]:
-    """LLM 出力から JSON array (`[...]`) を抽出し、文字列のリストに。
+def _parse_json_array(content: str) -> list[Any]:
+    """LLM 出力から JSON array (`[...]`) を抽出。周辺に説明文があっても OK。
 
-    - 周辺に余計な前置き/後置き文章があっても最初の `[` と最後の `]` 区間を掴む
+    - 最初の `[` と最後の `]` 区間を掴む
     - 解析失敗 / 見つからない → 空リスト
+    - 非 array (dict など) が入っていたら [] を返す
     """
     if not content:
         return []
-    # 最初の `[` から最後の `]` まで (貪欲マッチ) を取る
     start = content.find("[")
     end = content.rfind("]")
     if start == -1 or end == -1 or end < start:
@@ -262,6 +415,12 @@ def _parse_gaps_json(content: str) -> list[str]:
         return []
     if not isinstance(data, list):
         return []
+    return data
+
+
+def _parse_gaps_json(content: str) -> list[str]:
+    """LLM 出力から JSON array を抽出し、非空文字列のリストにする。"""
+    data = _parse_json_array(content)
     return [str(x) for x in data if x]
 
 
@@ -317,14 +476,104 @@ def coverage_verifier(state: TopicDebateState, config: RunnableConfig) -> dict:
     }
 
 
+def _infer_category(title: str, body: str, categories: list[str]) -> str:
+    """issue title + body から content category を推定 (v0.1 は簡易 token match)。
+
+    カテゴリ名 (ハイフン含む・除く両方) が本文に含まれていれば採用、
+    何もマッチしなければ `fundamentals` or categories[0]。
+    """
+    text = f"{title} {body}".lower()
+    for cat in categories:
+        cat_lower = cat.lower()
+        if cat_lower in text or cat_lower.replace("-", " ") in text:
+            return cat
+    if "fundamentals" in categories:
+        return "fundamentals"
+    return categories[0] if categories else "fundamentals"
+
+
+def _determine_output_path(state: TopicDebateState, lcfg: LibmaticConfig) -> str:
+    """lifespan + category + slug から記事の保存先 path を決める。
+
+    - universal: content/{category}/notes/<slug>.md
+    - ephemeral: content/digest/{year}/Q{quarter}/<slug>.md
+    """
+    category = _infer_category(state.issue_title, state.issue_body, lcfg.content.categories)
+    slug = _slugify(state.issue_title)
+
+    if state.lifespan == "universal":
+        rendered = lcfg.content.universal_dir.format(category=category)
+    else:
+        now = datetime.now(UTC)
+        quarter = (now.month - 1) // 3 + 1
+        rendered = lcfg.content.ephemeral_dir.format(year=now.year, quarter=quarter)
+
+    return f"{rendered}/{slug}.md"
+
+
 def article_writer(state: TopicDebateState, config: RunnableConfig) -> dict:
-    """Step 7 (ReAct): 原本記事を執筆。"""
-    raise NotImplementedError("次 PR で ReAct agent として実装")
+    """Step 7 (ReAct): merged_facts を元に原本記事 Markdown を執筆。
+
+    出力先 `output_path` を lifespan と category から決定して state に格納する。
+    """
+    lcfg = _get_libmatic_config(config)
+
+    agent = build_step_agent(
+        step_name="step7_article_writer",
+        config=lcfg,
+        tools=[],
+        system_prompt=load_prompt("topic_debate/step7_article_writer.md"),
+    )
+
+    facts_payload = [f.model_dump() for f in state.merged_facts]
+    input_text = (
+        f"## テーマ\n{state.issue_title}\n\n"
+        f"## issue 本文\n{state.issue_body}\n\n"
+        f"## lifespan\n{state.lifespan}\n\n"
+        f"## merged_facts\n{json.dumps(facts_payload, ensure_ascii=False)}\n\n"
+        f"## coverage_gaps\n{json.dumps(state.coverage_gaps, ensure_ascii=False)}\n"
+    )
+
+    try:
+        result = agent.invoke({"messages": [HumanMessage(content=input_text)]})
+        article = _last_message_content(result)
+    except Exception:
+        article = ""
+
+    output_path = _determine_output_path(state, lcfg)
+
+    return {
+        "article_draft": article,
+        "output_path": output_path,
+    }
 
 
 def expanded_writer(state: TopicDebateState, config: RunnableConfig) -> dict:
-    """Step 8 (ReAct): 初学者向け拡張版を執筆。"""
-    raise NotImplementedError("次 PR で ReAct agent として実装")
+    """Step 8 (ReAct): article_draft を初学者向けに再構成した拡張版を執筆。"""
+    lcfg = _get_libmatic_config(config)
+
+    agent = build_step_agent(
+        step_name="step8_expanded_writer",
+        config=lcfg,
+        tools=[],
+        system_prompt=load_prompt("topic_debate/step8_expanded_writer.md"),
+    )
+
+    facts_payload = [f.model_dump() for f in state.merged_facts]
+    input_text = (
+        f"## テーマ\n{state.issue_title}\n\n"
+        f"## lifespan\n{state.lifespan}\n\n"
+        f"## article_draft\n{state.article_draft}\n\n"
+        f"## merged_facts\n{json.dumps(facts_payload, ensure_ascii=False)}\n"
+    )
+
+    try:
+        result = agent.invoke({"messages": [HumanMessage(content=input_text)]})
+        expanded = _last_message_content(result)
+    except Exception:
+        expanded = ""
+
+    return {"article_expanded": expanded}
 
 
 # --- Step 9: pr_opener (deterministic) ---
