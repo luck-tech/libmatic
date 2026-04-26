@@ -24,6 +24,15 @@ from langchain_core.runnables import RunnableConfig
 
 from libmatic.agents.react import build_step_agent
 from libmatic.config import LibmaticConfig
+from libmatic.nodes._helpers import (
+    get_libmatic_config as _get_libmatic_config,
+)
+from libmatic.nodes._helpers import (
+    last_message_content as _last_message_content,
+)
+from libmatic.nodes._helpers import (
+    parse_json_array as _parse_json_array,
+)
 from libmatic.prompts.loader import load_prompt
 from libmatic.state.topic_debate import Fact, Source, TopicDebateState
 from libmatic.tools.coverage import CoverageReport, verify_coverage_core
@@ -32,19 +41,6 @@ from libmatic.tools.github import gh_issue_edit_core, gh_pr_create_core
 from libmatic.tools.search_sources import search_sources
 from libmatic.tools.source import fetch_source_core
 from libmatic.tools.web import web_fetch
-
-
-def _get_libmatic_config(config: RunnableConfig) -> LibmaticConfig:
-    """RunnableConfig から LibmaticConfig を取り出す。"""
-    configurable = (config or {}).get("configurable") or {}
-    lcfg = configurable.get("libmatic_config")
-    if not isinstance(lcfg, LibmaticConfig):
-        raise ValueError(
-            "RunnableConfig.configurable.libmatic_config に "
-            "LibmaticConfig インスタンスをセットしてください"
-        )
-    return lcfg
-
 
 # --- Step 1: source_collector (ReAct) ---
 
@@ -372,51 +368,8 @@ def _format_step6_input(
     return "\n".join(lines)
 
 
-def _last_message_content(result: Any) -> str:
-    """LangGraph agent の invoke 結果から最後の message の content を string で取る。
-
-    Anthropic 等の structured content (list of {type, text}) も平文化する。
-    """
-    messages = (result or {}).get("messages", []) if isinstance(result, dict) else []
-    if not messages:
-        return ""
-    last = messages[-1]
-    content = getattr(last, "content", None)
-    if content is None and isinstance(last, dict):
-        content = last.get("content")
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                parts.append(block.get("text", ""))
-            elif isinstance(block, str):
-                parts.append(block)
-        return "\n".join(parts)
-    return str(content) if content is not None else ""
-
-
-def _parse_json_array(content: str) -> list[Any]:
-    """LLM 出力から JSON array (`[...]`) を抽出。周辺に説明文があっても OK。
-
-    - 最初の `[` と最後の `]` 区間を掴む
-    - 解析失敗 / 見つからない → 空リスト
-    - 非 array (dict など) が入っていたら [] を返す
-    """
-    if not content:
-        return []
-    start = content.find("[")
-    end = content.rfind("]")
-    if start == -1 or end == -1 or end < start:
-        return []
-    snippet = content[start : end + 1]
-    try:
-        data = json.loads(snippet)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(data, list):
-        return []
-    return data
-
+# NOTE: _last_message_content / _parse_json_array は libmatic.nodes._helpers
+# に切り出し済み (import で参照)。
 
 def _parse_gaps_json(content: str) -> list[str]:
     """LLM 出力から JSON array を抽出し、非空文字列のリストにする。"""
