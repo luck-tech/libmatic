@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.libmatic.topic-debate.nightly</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <!-- topic/ready の最古の issue を pick して libmatic topic-debate を呼ぶ -->
+    <string>cd ~/projects/MY_PROJECT && ISSUE=$(gh issue list --label topic/ready --state open --json number --limit 1 --jq '.[0].number') &amp;&amp; [ -n "$ISSUE" ] &amp;&amp; uv run libmatic topic-debate "$ISSUE" --config config/libmatic.yml</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <!-- 毎日 03:00 JST -->
+    <key>Hour</key><integer>3</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/libmatic.topic-debate.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/libmatic.topic-debate.err.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

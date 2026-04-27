@@ -1,0 +1,38 @@
+name: 議論テーマ
+description: libmatic で議論記事を生成するテーマを起票する (suggest-topics と同等の手動入口)
+title: "[topic] "
+labels: ["topic/pending"]
+body:
+  - type: input
+    id: theme
+    attributes:
+      label: テーマ題名
+      description: 50-100 文字で簡潔に
+      placeholder: "React Compiler が問う「最適化の責任」: 自動メモ化 vs 明示メモ化のトレードオフ"
+    validations:
+      required: true
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景 / 想定論点
+      description: 議論の前提と、想定される対立軸を 200-600 文字程度で
+    validations:
+      required: true
+  - type: dropdown
+    id: lifespan
+    attributes:
+      label: lifespan
+      description: |
+        - universal: 2 年後も読まれる議論 (設計原則・トレードオフ・歴史)
+        - ephemeral: 数ヶ月で陳腐化する話 (特定版比較、直近事件)
+      options:
+        - universal
+        - ephemeral
+      default: 0
+    validations:
+      required: true
+  - type: textarea
+    id: source_urls
+    attributes:
+      label: 参考 URL (任意)
+      description: 既知の一次情報があれば改行区切りで

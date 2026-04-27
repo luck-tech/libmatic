@@ -1,0 +1,27 @@
+name: weekly-suggest-topics
+
+on:
+  schedule:
+    # 毎週月曜 朝 9:00 JST = 0:00 UTC
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+
+jobs:
+  suggest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Install libmatic
+        run: uv sync
+      - name: Run suggest-topics
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          uv run libmatic suggest-topics --config config/libmatic.yml

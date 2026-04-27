@@ -55,6 +55,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["libmatic"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# scaffold templates / prompts md は package data として配布する
+"libmatic/scaffold/templates" = "libmatic/scaffold/templates"
+"libmatic/prompts" = "libmatic/prompts"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

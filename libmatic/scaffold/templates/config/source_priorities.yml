@@ -1,0 +1,33 @@
+# 信頼する発信者リスト。`/suggest-topics` (週次) はここから feed を展開して巡回する。
+#
+# 構造:
+#   blogs:        - name + url + (任意) feed
+#   zenn.users:   - handle (https://zenn.dev/<handle>/feed が自動展開される)
+#   qiita.users:  - handle
+#   x.handles:    - handle (将来用、現状 X 巡回は read-only proxy 経由)
+#   youtube.channels: - id (UCxxx... の channel_id、handle ではないので注意)
+#
+# 新規 source を追加したい場合は libmatic-oss-plan.md §3.4 のフローに従い、
+# 自動で書換えず PR 経由で承認するのを推奨。
+
+blogs: []
+  # - name: Example Blog
+  #   url: https://example.com/
+  #   feed: https://example.com/rss.xml
+
+zenn:
+  users: []
+  # - handle: example_zenn_user
+
+qiita:
+  users: []
+  # - handle: example_qiita_user
+
+x:
+  handles: []
+  # - handle: example_x_handle
+
+youtube:
+  channels: []
+  # - name: Example Channel
+  #   id: UCxxxxxxxxxxxxxxxxxxxxxx

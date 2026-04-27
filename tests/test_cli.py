@@ -46,10 +46,13 @@ def test_version_command(runner: CliRunner) -> None:
 # --- init (stub) ---
 
 
-def test_init_stub(runner: CliRunner) -> None:
-    result = runner.invoke(app, ["init"])
+def test_init_help_lists_options(runner: CliRunner) -> None:
+    """init は help で必要な options を documented する (実装は test_cli_init.py)."""
+    result = runner.invoke(app, ["init", "--help"])
     assert result.exit_code == 0
-    assert "Phase 1.9" in result.stdout
+    assert "--target-dir" in result.stdout
+    assert "--repo" in result.stdout
+    assert "--preset" in result.stdout
 
 
 # --- _load_config / _runtime_config ---

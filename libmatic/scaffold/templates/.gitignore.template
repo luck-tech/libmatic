@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.python-version
+
+# uv
+uv.lock.bak
+
+# libmatic runtime state
+.libmatic/
+*.sqlite
+*.sqlite-journal
+
+# Secrets
+.env
+.env.local
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

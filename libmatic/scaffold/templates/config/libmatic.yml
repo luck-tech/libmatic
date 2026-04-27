@@ -1,0 +1,37 @@
+version: 1
+provider: anthropic
+preset: {{PRESET}}
+
+# Step 別の model override (任意)
+# preset を上書きしたい step だけ書く
+models:
+  overrides: {}
+  # 例: 記事執筆だけ Opus に上げたい場合
+  # overrides:
+  #   step7_article_writer: claude-opus-4-7
+  #   step8_expanded_writer: claude-opus-4-7
+
+content:
+  universal_dir: "content/{category}/notes"
+  ephemeral_dir: "content/digest/{year}/Q{quarter}"
+  categories:
+{{CATEGORIES_YAML}}
+
+lifespan:
+  ephemeral_pruning_years: 2
+
+workflow:
+  max_sources_per_topic: 12
+  max_concurrent_fetches: 6
+  max_react_iterations: 15
+  coverage_threshold: 0.80
+  max_coverage_loops: 2
+
+github:
+  repo: {{GITHUB_REPO}}
+  issue_labels:
+    pending: topic/pending
+    ready: topic/ready
+    in_progress: topic/in-progress
+    review: topic/review
+    failed: topic/failed

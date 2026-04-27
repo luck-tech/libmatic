@@ -59,9 +59,89 @@ def version() -> None:
 
 
 @app.command()
-def init() -> None:
-    """対話形式で libmatic プロジェクトを scaffold する (Phase 1.9 で実装予定)."""
-    typer.echo("[stub] libmatic init — Phase 1.9 で実装予定 (対話で provider/preset 選択)")
+def init(
+    target_dir: str = typer.Option(
+        ".", "--target-dir", "-t", help="scaffold 先ディレクトリ (default: 現 dir)"
+    ),
+    preset: str = typer.Option(
+        "", "--preset", help="quality / balanced / economy (省略時は対話)"
+    ),
+    repo: str = typer.Option(
+        "", "--repo", help="GitHub repo (owner/name 形式、省略時は対話)"
+    ),
+    no_claude_code: bool = typer.Option(
+        False, "--no-claude-code", help=".claude/commands を生成しない"
+    ),
+    no_github_actions: bool = typer.Option(
+        False, "--no-github-actions", help=".github/workflows を生成しない"
+    ),
+    launchd: bool = typer.Option(
+        False, "--launchd", help="macOS launchd plist テンプレを含める"
+    ),
+    overwrite: bool = typer.Option(
+        False, "--overwrite", help="既存ファイルを上書き"
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="対話を省略してデフォルトで進める (CI 用)"
+    ),
+) -> None:
+    """libmatic プロジェクトを対話で scaffold する。
+
+    生成内容:
+      - config/libmatic.yml, config/source_priorities.yml
+      - .env.example, .gitignore
+      - .github/workflows/{weekly-suggest,nightly-debate}.yml + ISSUE_TEMPLATE/topic.yml
+      - .claude/commands/{suggest-topics,topic-debate,address-pr-comments}.md
+      - scripts/launchd/*.plist.example (--launchd 時のみ)
+      - content/<category>/notes/.gitkeep + content/digest/.gitkeep
+    """
+    from libmatic.scaffold import (
+        DEFAULT_CATEGORIES,
+        PRESET_CHOICES,
+        InitOptions,
+        write_scaffold,
+    )
+
+    typer.echo("==> libmatic init", err=True)
+
+    if not preset:
+        if yes:
+            preset = "balanced"
+        else:
+            preset = typer.prompt(
+                f"preset {PRESET_CHOICES} を選択",
+                default="balanced",
+            )
+    if preset not in PRESET_CHOICES:
+        typer.echo(f"preset は {PRESET_CHOICES} のいずれか: {preset}", err=True)
+        raise typer.Exit(code=1)
+
+    if not repo:
+        if yes:
+            typer.echo("--repo を指定するか、対話モードで実行してください", err=True)
+            raise typer.Exit(code=1)
+        repo = typer.prompt("GitHub repo (owner/name)")
+    if "/" not in repo:
+        typer.echo(f"repo は owner/name 形式で: {repo}", err=True)
+        raise typer.Exit(code=1)
+
+    opts = InitOptions(
+        target_dir=Path(target_dir).resolve(),
+        github_repo=repo,
+        preset=preset,
+        categories=DEFAULT_CATEGORIES,
+        include_claude_code=not no_claude_code,
+        include_github_actions=not no_github_actions,
+        include_launchd=launchd,
+        overwrite=overwrite,
+    )
+    write_scaffold(opts)
+
+    typer.echo(f"==> {len(opts.written_files)} ファイル生成: {opts.target_dir}", err=True)
+    typer.echo("次の手順:", err=True)
+    typer.echo("  1. .env.example を .env にコピーして API key を設定", err=True)
+    typer.echo("  2. config/source_priorities.yml に信頼発信者を追加", err=True)
+    typer.echo("  3. uv sync && uv run libmatic suggest-topics", err=True)
 
 
 @app.command("suggest-topics")
