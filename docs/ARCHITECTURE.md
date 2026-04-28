@@ -1,7 +1,14 @@
 # libmatic ARCHITECTURE
 
-**状態**: Phase 1.2 草案（2026-04-23）
-**目的**: libmatic core の LangGraph hybrid アーキテクチャを全体俯瞰する。node 単位の詳細仕様は [SPEC.md](SPEC.md)、Phase 0 の意思決定は [`../../docs/libmatic-oss-plan.md`](../../docs/libmatic-oss-plan.md) を参照。
+**状態**: Phase 1.2 草案（2026-04-23）→ Phase 1.3-1.10 で実装完了 (2026-04-28 update)
+**目的**: libmatic core の LangGraph hybrid アーキテクチャを全体俯瞰する。node 単位の詳細仕様は [SPEC.md](SPEC.md)、運用は [SETUP.md](SETUP.md) / [COST.md](COST.md) / [TROUBLESHOOTING.md](TROUBLESHOOTING.md)、概念は [CONCEPTS.md](CONCEPTS.md)、Phase 0 の意思決定は [`../../docs/libmatic-oss-plan.md`](../../docs/libmatic-oss-plan.md) を参照。
+
+実装状態 (2026-04-28):
+- ✅ 3 workflow (topic-debate 9 step / suggest-topics 6 step / pr-review 5 step) すべて実装
+- ✅ tools 8 種実装 (search_sources / verify_coverage / fetch_source / fetch_x / web / github / fs / bash)
+- ✅ ReAct agent factory + prompts loader
+- ✅ checkpointer (SqliteSaver) + CLI 結線 + scaffold (libmatic init)
+- ✅ 358 tests pass
 
 ---
 

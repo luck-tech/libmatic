@@ -6,18 +6,35 @@
 
 ## 状態
 
-**Phase 1 (spike 開発中)** — 上位 repo [`luck-tech/my_library`](https://github.com/luck-tech/my_library) 内の `libmatic/` サブディレクトリで開発中。Phase 1.11 で `git subtree split` により独立 repo `luck-tech/libmatic` に切り出す予定。
+**Phase 1 spike 完了直前** (2026-04-28) — 上位 repo [`luck-tech/my_library`](https://github.com/luck-tech/my_library) 内の `libmatic/` サブディレクトリで開発中。3 workflow + tools + scaffold + CLI 結線が揃い、`v0.1.0-alpha` タグ前の最終仕上げ段階。Phase 1.11 で `git subtree split` により独立 repo `luck-tech/libmatic` に切り出す予定。
 
 Phase 0 の設計書: [`../docs/libmatic-oss-plan.md`](../docs/libmatic-oss-plan.md)
 
-## クイックスタート (開発用)
+## クイックスタート
+
+新規 repo に libmatic を導入する場合:
 
 ```bash
-# editable install
-uv pip install -e .
+mkdir my-knowledge-base && cd my-knowledge-base
+git init
+uv init --package
+uv add 'libmatic @ git+https://github.com/luck-tech/libmatic.git'
+uv run libmatic init --repo <owner>/<repo>
 
-# CLI 動作確認
-libmatic --help
+# .env.example を .env にコピーして API key 設定 → 動作確認
+cp .env.example .env  # 編集
+uv run libmatic suggest-topics
+```
+
+詳しい手順は [docs/SETUP.md](docs/SETUP.md)。
+
+### 開発用 (libmatic 自体を hack する場合)
+
+```bash
+git clone https://github.com/luck-tech/libmatic.git && cd libmatic
+uv sync --extra dev
+.venv/bin/pytest                       # 358 tests
+.venv/bin/libmatic --help
 ```
 
 ## 主要コンセプト
@@ -30,7 +47,11 @@ libmatic --help
 
 ## ドキュメント
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — LangGraph hybrid の graph 構造
+- [docs/SETUP.md](docs/SETUP.md) — 導入手順 (uv init / scaffold / secrets / 定期実行)
+- [docs/CONCEPTS.md](docs/CONCEPTS.md) — lifespan / 9 step / luck-ism の説明
+- [docs/COST.md](docs/COST.md) — preset 別 token コスト試算 + GH Actions min 制限
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — よくあるハマり所
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — LangGraph hybrid の graph 構造 (技術寄り)
 - [docs/SPEC.md](docs/SPEC.md) — State schema, node 種別, tool 一覧, coverage loop
 
 ## ライセンス
