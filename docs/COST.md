@@ -70,7 +70,12 @@ C2 (cheap、small) + C3 (default、コード読み書きで多め):
 | address-pr-comments | 5 PR/月 | $5 | $1.3 | $0.5 |
 | **合計** | | **~$145** | **~$32** | **~$13** |
 
-実際は coverage loop で +10-20%、prompt caching (v1.1) で -30-50% の調整あり。
+実際は以下の調整あり:
+
+- **coverage loop**: step 5/6 が再走するケースで +10-20%
+- **adaptive thinking** (step 7/8): 長文の論理一貫性のため有効化。output token に thinking 分が乗る (おおよそ +20-50% 程度、複雑なテーマほど多い)
+- **effort 設定**: step 7/8 は Opus 4.7 で `xhigh` (Sonnet 4.6 では自動 clamp で `high`)、source/merger/verifier 系は `medium` で短縮。balanced default の `high` より tuning 後はやや軽い
+- **prompt caching**: 同一 step 内 ReAct loop の system prefix は cache 済 (v0.1 から、`cache_control: ephemeral`)。実 input cost は -10-20%。v1.1 で tool 結果も cache 化予定 (-30-50%)
 
 ## 3. preset の選び方
 

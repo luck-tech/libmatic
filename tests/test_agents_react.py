@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from libmatic.agents.react import build_step_agent
 from libmatic.config import GitHubConfig, LibmaticConfig
@@ -57,7 +58,21 @@ def test_build_step_agent_resolves_model_and_passes_tools(
     assert captured["cfg"] is default_config
     assert captured["kwargs"]["model"] == "fake-model-instance"
     assert captured["kwargs"]["tools"] == [sentinel_tool]
-    assert captured["kwargs"]["prompt"] == "あなたは記事執筆者です。"
+
+    # prompt は cache_control 付き SystemMessage を返す callable
+    prompt_fn = captured["kwargs"]["prompt"]
+    assert callable(prompt_fn)
+    user_msg = HumanMessage(content="hello")
+    rendered = prompt_fn({"messages": [user_msg]})
+    assert isinstance(rendered[0], SystemMessage)
+    assert rendered[0].content == [
+        {
+            "type": "text",
+            "text": "あなたは記事執筆者です。",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    assert rendered[1] is user_msg
 
 
 def test_build_step_agent_without_prompt_omits_kwarg(
