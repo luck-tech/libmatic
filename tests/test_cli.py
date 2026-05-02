@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -10,6 +11,18 @@ import pytest
 from typer.testing import CliRunner
 
 from libmatic.cli import app
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _strip_ansi_and_ws(s: str) -> str:
+    """ANSI escape と全 whitespace を除去。
+
+    Rich がヘルプを描画する際、option 名 (`--target-dir`) が改行や
+    style escape で分断される (CI の TTY 無し / 80 桁 fallback で発生)。
+    全 whitespace を削ることで `--target-\\n   dir` も `--target-dir` に正規化。
+    """
+    return re.sub(r"\s+", "", _ANSI_RE.sub("", s))
 
 
 @pytest.fixture
@@ -50,9 +63,10 @@ def test_init_help_lists_options(runner: CliRunner) -> None:
     """init は help で必要な options を documented する (実装は test_cli_init.py)."""
     result = runner.invoke(app, ["init", "--help"])
     assert result.exit_code == 0
-    assert "--target-dir" in result.stdout
-    assert "--repo" in result.stdout
-    assert "--preset" in result.stdout
+    clean = _strip_ansi_and_ws(result.stdout)
+    assert "--target-dir" in clean
+    assert "--repo" in clean
+    assert "--preset" in clean
 
 
 # --- _load_config / _runtime_config ---
