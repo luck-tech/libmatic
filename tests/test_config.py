@@ -14,7 +14,7 @@ def test_config_defaults(default_config: LibmaticConfig) -> None:
     assert default_config.preset == "balanced"
     assert default_config.workflow.coverage_threshold == 0.80
     assert default_config.workflow.max_coverage_loops == 2
-    assert default_config.github.repo == "luck-tech/my_library"
+    assert default_config.github.repo == "OWNER/REPO"
     assert default_config.github.issue_labels.pending == "topic/pending"
 
 

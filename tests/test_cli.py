@@ -26,7 +26,7 @@ version: 1
 provider: anthropic
 preset: balanced
 github:
-  repo: luck-tech/my_library
+  repo: OWNER/REPO
 """,
         encoding="utf-8",
     )

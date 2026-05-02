@@ -424,7 +424,7 @@ workflow:
   max_coverage_loops: 2
 
 github:
-  repo: luck-tech/my_library
+  repo: OWNER/REPO
   issue_labels:
     pending: topic/pending
     ready: topic/ready

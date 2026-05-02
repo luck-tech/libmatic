@@ -27,7 +27,7 @@ from libmatic.state.suggest_topics import SuggestTopicsState, TopicCandidate
 
 
 def _make_config() -> LibmaticConfig:
-    return LibmaticConfig(github=GitHubConfig(repo="luck-tech/my_library"))
+    return LibmaticConfig(github=GitHubConfig(repo="OWNER/REPO"))
 
 
 def _rc(lcfg: LibmaticConfig) -> RunnableConfig:

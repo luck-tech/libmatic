@@ -6,9 +6,9 @@
 
 ## 状態
 
-**Phase 1 spike 完了直前** (2026-04-28) — 上位 repo [`luck-tech/my_library`](https://github.com/luck-tech/my_library) 内の `libmatic/` サブディレクトリで開発中。3 workflow + tools + scaffold + CLI 結線が揃い、`v0.1.0-alpha` タグ前の最終仕上げ段階。Phase 1.11 で `git subtree split` により独立 repo `luck-tech/libmatic` に切り出す予定。
+**Phase 1 spike 完了** (2026-05-02) — 3 workflow + tools + scaffold + CLI 結線、Anthropic API tuning、377 tests passing。`git subtree split` で独立 repo `luck-tech/libmatic` に切り出した直後 (履歴保持)。次は実 API での E2E 確認 → `v0.1.0-alpha` タグ。
 
-Phase 0 の設計書: [`../docs/libmatic-oss-plan.md`](../docs/libmatic-oss-plan.md)
+Phase 0 の設計書 (上位 repo `luck-tech/my_library` 内): [docs/libmatic-oss-plan.md](https://github.com/luck-tech/my_library/blob/main/docs/libmatic-oss-plan.md)
 
 ## クイックスタート
 

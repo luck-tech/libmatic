@@ -10,5 +10,5 @@ from libmatic.config import GitHubConfig, LibmaticConfig
 @pytest.fixture
 def default_config() -> LibmaticConfig:
     return LibmaticConfig(
-        github=GitHubConfig(repo="luck-tech/my_library"),
+        github=GitHubConfig(repo="OWNER/REPO"),
     )

@@ -44,9 +44,9 @@ dev = [
 libmatic = "libmatic.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/luck-tech/my_library"
-Repository = "https://github.com/luck-tech/my_library"
-Issues = "https://github.com/luck-tech/my_library/issues"
+Homepage = "https://github.com/luck-tech/libmatic"
+Repository = "https://github.com/luck-tech/libmatic"
+Issues = "https://github.com/luck-tech/libmatic/issues"
 
 [build-system]
 requires = ["hatchling"]
